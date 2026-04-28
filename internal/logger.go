@@ -75,8 +75,8 @@ func InitLogger() {
 		logLevel.Set(slog.LevelDebug)
 	}
 
-	if level := getEnvString("LOG_LEVEL", ""); level != "" {
-		switch strings.ToLower(level) {
+	if Cfg != nil && Cfg.LogLevel != "" {
+		switch strings.ToLower(Cfg.LogLevel) {
 		case "debug":
 			logLevel.Set(slog.LevelDebug)
 		case "warn":

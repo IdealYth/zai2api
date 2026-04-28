@@ -17,23 +17,13 @@ type Config struct {
 	AuthTokens   []string // 支持多个 API Key（逗号分隔）
 	BackupTokens []string // 支持多个 Backup Token（用于多模态，逗号分隔）
 
-	// Model Configuration
-	PrimaryModel     string
-	ThinkingModel    string
-	SearchModel      string
-	AirModel         string
-	PrimaryModelNew  string
-	ThinkingModelNew string
-	SearchModelNew   string
-
 	// Feature Configuration
-	DebugLogging       bool
-	AnonymousMode      bool
-	ToolSupport        bool
-	SkipAuthToken      bool
-	ThinkingProcessing string // think, strip, raw
-	ScanLimit          int
-	LogLevel           string
+	DebugLogging  bool
+	ToolSupport   bool
+	RetryCount    int
+	SkipAuthToken bool
+	ScanLimit     int
+	LogLevel      string
 
 	// Display
 	Note []string // 多行备注，在 / 显示
@@ -115,23 +105,13 @@ func LoadConfig() {
 		AuthTokens:   getEnvStringSlice("AUTH_TOKEN"),
 		BackupTokens: getEnvStringSlice("BACKUP_TOKEN"),
 
-		// Model Configuration
-		PrimaryModel:     getEnvString("PRIMARY_MODEL", "GLM-4.5"),
-		ThinkingModel:    getEnvString("THINKING_MODEL", "GLM-4.5-Thinking"),
-		SearchModel:      getEnvString("SEARCH_MODEL", "GLM-4.5-Search"),
-		AirModel:         getEnvString("AIR_MODEL", "GLM-4.5-Air"),
-		PrimaryModelNew:  getEnvString("PRIMARY_MODEL_NEW", "GLM-4.6"),
-		ThinkingModelNew: getEnvString("THINKING_MODEL_NEW", "GLM-4.6-Thinking"),
-		SearchModelNew:   getEnvString("SEARCH_MODEL_NEW", "GLM-4.6-Search"),
-
 		// Feature Configuration
-		DebugLogging:       getEnvBool("DEBUG_LOGGING", false),
-		AnonymousMode:      getEnvBool("ANONYMOUS_MODE", true),
-		ToolSupport:        getEnvBool("TOOL_SUPPORT", true),
-		SkipAuthToken:      getEnvBool("SKIP_AUTH_TOKEN", false),
-		ThinkingProcessing: getEnvString("THINKING_PROCESSING", "think"),
-		ScanLimit:          getEnvInt("SCAN_LIMIT", 200000),
-		LogLevel:           getEnvString("LOG_LEVEL", "info"),
+		DebugLogging:  getEnvBool("DEBUG_LOGGING", false),
+		ToolSupport:   getEnvBool("TOOL_SUPPORT", true),
+		RetryCount:    getEnvInt("RETRY_COUNT", 5),
+		SkipAuthToken: getEnvBool("SKIP_AUTH_TOKEN", false),
+		ScanLimit:     getEnvInt("SCAN_LIMIT", 200000),
+		LogLevel:      getEnvString("LOG_LEVEL", "info"),
 
 		// Display
 		Note: parseNoteLines(getEnvString("NOTE", "")),

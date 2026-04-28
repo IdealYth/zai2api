@@ -8,7 +8,7 @@
 ## 功能特性
 
 - **OpenAI 兼容 API** - 支持 `/v1/chat/completions` 和 `/v1/models` 端点
-- **多模型支持** - GLM-4.5、GLM-4.5-Thinking、GLM-4.5-Search、GLM-4.5-Air 等
+- **多模型支持** - 内置常用模型别名，并自动从云端同步最新模型列表
 - **流式响应** - 支持 SSE 流式输出
 - **工具调用** - 支持 Function Calling
 - **多模态** - 支持图片输入
@@ -70,7 +70,7 @@ AUTH_TOKEN=your-api-key
 | `BACKUP_TOKEN` | - | 备用令牌（用于多模态） |
 | `DEBUG_LOGGING` | false | 调试日志 |
 | `TOOL_SUPPORT` | true | 工具调用支持 |
-| `THINKING_PROCESSING` | think | 思考过程处理：think/strip/raw |
+| `RETRY_COUNT` | 5 | 请求失败时的重试次数（不含首次请求） |
 | `LOG_LEVEL` | info | 日志级别：debug/info/warn/error |
 
 完整配置请参考 [.env.example](.env.example)
@@ -109,11 +109,27 @@ print(response.choices[0].message.content)
 
 ## 支持的模型
 
-- `GLM-4.5` - 主模型
-- `GLM-4.5-Thinking` - 思考模型
-- `GLM-4.5-Search` - 搜索增强模型
-- `GLM-4.5-Air` - 轻量模型
-- `GLM-4.6` 系列（新版）
+- 启动后会从云端拉取最新模型列表，并自动补充到 `/v1/models`
+- 当前模型列表可按基础模型分组理解，大多数基础模型会自动提供以下后缀变体：
+  `-thinking`、`-search`、`-thinking-search`
+- 当前已返回的基础模型包括：
+  `GLM-4.5`
+  `GLM-4.5-Search`
+  `GLM-4.5-V`
+  `GLM-4.5-Air`
+  `GLM-4.6`
+  `GLM-4.6-Thinking`
+  `GLM-4.6-Search`
+  `GLM-4.6-V`
+  `GLM-4.7`
+  `GLM-5`
+  `GLM-5-Turbo`
+  `GLM-5v-Turbo`
+  `GLM-5.1`
+  `glm-4.6v`
+  `glm-4-flash`
+  `glm-4-air-250414`
+  `GLM-4.1V-Thinking-FlashX`
 
 ## 项目结构
 

@@ -330,17 +330,14 @@ func (u *UpstreamData) GetErrorMessage() string {
 
 // UpstreamResult 上游请求结果
 type UpstreamResult struct {
-	Success      bool
-	HasContent   bool
-	ErrorMessage string
-	OutputTokens int64
+	Success         bool
+	HasContent      bool
+	ResponseStarted bool
+	ErrorMessage    string
+	OutputTokens    int64
 }
 
-// 重试配置
-const (
-	MaxRetries   = 2 // 最大重试次数
-	RetryableErr = "INTERNAL_ERROR"
-)
+const RetryableErr = "INTERNAL_ERROR"
 
 func (u *UpstreamData) GetEditContent() string {
 	editContent := u.Data.EditContent
@@ -549,14 +546,15 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	success := false
 
 	// 重试循环
-	for attempt := 0; attempt <= MaxRetries; attempt++ {
+	maxRetries := max(Cfg.RetryCount, 0)
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			// 重试时获取新 token
 			if newToken := GetTokenManager().GetToken(); newToken != "" && newToken != token {
 				token = newToken
-				LogInfo("Retry %d/%d with new token", attempt, MaxRetries)
+				LogInfo("Retry %d/%d with new token", attempt, maxRetries)
 			} else {
-				LogInfo("Retry %d/%d with same token", attempt, MaxRetries)
+				LogInfo("Retry %d/%d with same token", attempt, maxRetries)
 			}
 		}
 
@@ -606,7 +604,7 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 流式请求已开始写入，无法重试
-		if req.Stream && attempt == 0 {
+		if req.Stream && result.ResponseStarted {
 			LogDebug("Stream response already started, cannot retry")
 			break
 		}
@@ -1265,12 +1263,6 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 	var outputTokens int64
 	var fullContent strings.Builder
 	var upstreamError string
-	if isFirstAttempt {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("X-Accel-Buffering", "no")
-	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -1278,20 +1270,51 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 		result.ErrorMessage = "streaming not supported"
 		return result
 	}
-	firstChunk := ChatCompletionChunk{
-		ID:      completionID,
-		Object:  "chat.completion.chunk",
-		Created: time.Now().Unix(),
-		Model:   modelName,
-		Choices: []Choice{{
-			Index:        0,
-			Delta:        &Delta{Role: "assistant"},
-			FinishReason: nil,
-		}},
+
+	startStream := func() error {
+		if result.ResponseStarted {
+			return nil
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+
+		firstChunk := ChatCompletionChunk{
+			ID:      completionID,
+			Object:  "chat.completion.chunk",
+			Created: time.Now().Unix(),
+			Model:   modelName,
+			Choices: []Choice{{
+				Index:        0,
+				Delta:        &Delta{Role: "assistant"},
+				FinishReason: nil,
+			}},
+		}
+		data, _ := json.Marshal(firstChunk)
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+			return err
+		}
+		flusher.Flush()
+		result.ResponseStarted = true
+		return nil
 	}
-	data, _ := json.Marshal(firstChunk)
-	fmt.Fprintf(w, "data: %s\n\n", data)
-	flusher.Flush()
+
+	sendChunk := func(chunk interface{}) bool {
+		if err := startStream(); err != nil {
+			result.Success = false
+			result.ErrorMessage = err.Error()
+			return false
+		}
+		chunkData, _ := json.Marshal(chunk)
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", chunkData); err != nil {
+			result.Success = false
+			result.ErrorMessage = err.Error()
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
 
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -1323,24 +1346,26 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 		if upstream.HasError() {
 			upstreamError = upstream.GetErrorMessage()
 			LogError("Upstream error: %s", upstreamError)
-			errContent := fmt.Sprintf("[上游服务错误: %s]", upstreamError)
-			errChunk := ChatCompletionChunk{
-				ID:      completionID,
-				Object:  "chat.completion.chunk",
-				Created: time.Now().Unix(),
-				Model:   modelName,
-				Choices: []Choice{{
-					Index:        0,
-					Delta:        &Delta{Content: errContent},
-					FinishReason: nil,
-				}},
-			}
-			errData, _ := json.Marshal(errChunk)
-			fmt.Fprintf(w, "data: %s\n\n", errData)
-			flusher.Flush()
-			hasContent = true
 			result.Success = false
 			result.ErrorMessage = upstreamError
+			if result.ResponseStarted {
+				errContent := fmt.Sprintf("[上游服务错误: %s]", upstreamError)
+				errChunk := ChatCompletionChunk{
+					ID:      completionID,
+					Object:  "chat.completion.chunk",
+					Created: time.Now().Unix(),
+					Model:   modelName,
+					Choices: []Choice{{
+						Index:        0,
+						Delta:        &Delta{Content: errContent},
+						FinishReason: nil,
+					}},
+				}
+				if !sendChunk(errChunk) {
+					return result
+				}
+				hasContent = true
+			}
 			break
 		}
 
@@ -1380,9 +1405,9 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 							FinishReason: nil,
 						}},
 					}
-					chunkData, _ := json.Marshal(chunk)
-					fmt.Fprintf(w, "data: %s\n\n", chunkData)
-					flusher.Flush()
+					if !sendChunk(chunk) {
+						return result
+					}
 				}
 			}
 			continue
@@ -1417,9 +1442,9 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 							FinishReason: nil,
 						}},
 					}
-					chunkData, _ := json.Marshal(chunk)
-					fmt.Fprintf(w, "data: %s\n\n", chunkData)
-					flusher.Flush()
+					if !sendChunk(chunk) {
+						return result
+					}
 				}
 			}
 			if results := ParseImageSearchResults(editContent); len(results) > 0 {
@@ -1444,9 +1469,9 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 							FinishReason: nil,
 						}},
 					}
-					chunkData, _ := json.Marshal(chunk)
-					fmt.Fprintf(w, "data: %s\n\n", chunkData)
-					flusher.Flush()
+					if !sendChunk(chunk) {
+						return result
+					}
 				}
 			}
 			continue
@@ -1468,9 +1493,9 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 					FinishReason: nil,
 				}},
 			}
-			chunkData, _ := json.Marshal(chunk)
-			fmt.Fprintf(w, "data: %s\n\n", chunkData)
-			flusher.Flush()
+			if !sendChunk(chunk) {
+				return result
+			}
 			pendingSourcesMarkdown = ""
 		}
 		if pendingImageSearchMarkdown != "" {
@@ -1486,9 +1511,9 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 					FinishReason: nil,
 				}},
 			}
-			chunkData, _ := json.Marshal(chunk)
-			fmt.Fprintf(w, "data: %s\n\n", chunkData)
-			flusher.Flush()
+			if !sendChunk(chunk) {
+				return result
+			}
 			pendingImageSearchMarkdown = ""
 		}
 
@@ -1511,9 +1536,9 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 						FinishReason: nil,
 					}},
 				}
-				chunkData, _ := json.Marshal(chunk)
-				fmt.Fprintf(w, "data: %s\n\n", chunkData)
-				flusher.Flush()
+				if !sendChunk(chunk) {
+					return result
+				}
 			}
 		}
 
@@ -1530,9 +1555,9 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 					FinishReason: nil,
 				}},
 			}
-			chunkData, _ := json.Marshal(chunk)
-			fmt.Fprintf(w, "data: %s\n\n", chunkData)
-			flusher.Flush()
+			if !sendChunk(chunk) {
+				return result
+			}
 			pendingSourcesMarkdown = ""
 		}
 
@@ -1580,9 +1605,9 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 					FinishReason: nil,
 				}},
 			}
-			chunkData, _ := json.Marshal(chunk)
-			fmt.Fprintf(w, "data: %s\n\n", chunkData)
-			flusher.Flush()
+			if !sendChunk(chunk) {
+				return result
+			}
 		}
 
 		if content == "" {
@@ -1617,9 +1642,9 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 		}
 
 		outputTokens += CountTokens(content)
-		chunkData, _ := json.Marshal(chunk)
-		fmt.Fprintf(w, "data: %s\n\n", chunkData)
-		flusher.Flush()
+		if !sendChunk(chunk) {
+			return result
+		}
 	}
 
 	if remaining := searchRefFilter.Flush(); remaining != "" {
@@ -1637,9 +1662,9 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 					FinishReason: nil,
 				}},
 			}
-			chunkData, _ := json.Marshal(chunk)
-			fmt.Fprintf(w, "data: %s\n\n", chunkData)
-			flusher.Flush()
+			if !sendChunk(chunk) {
+				return result
+			}
 		}
 	}
 	stopReason := "stop"
@@ -1667,9 +1692,9 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 						FinishReason: nil,
 					}},
 				}
-				toolData, _ := json.Marshal(toolChunk)
-				fmt.Fprintf(w, "data: %s\n\n", toolData)
-				flusher.Flush()
+				if !sendChunk(toolChunk) {
+					return result
+				}
 			}
 		} else {
 			// 未检测到工具调用，将缓冲的 content 作为普通内容发送
@@ -1686,11 +1711,17 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 						FinishReason: nil,
 					}},
 				}
-				chunkData, _ := json.Marshal(chunk)
-				fmt.Fprintf(w, "data: %s\n\n", chunkData)
-				flusher.Flush()
+				if !sendChunk(chunk) {
+					return result
+				}
 			}
 		}
+	}
+
+	if !hasContent {
+		result.OutputTokens = outputTokens
+		result.ErrorMessage = "empty response"
+		return result
 	}
 
 	finalChunk := ChatCompletionChunk{
@@ -1704,8 +1735,9 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 			FinishReason: &stopReason,
 		}},
 	}
-	finalData, _ := json.Marshal(finalChunk)
-	fmt.Fprintf(w, "data: %s\n\n", finalData)
+	if !sendChunk(finalChunk) {
+		return result
+	}
 
 	if includeUsage {
 		usageChunk := ChatCompletionChunkResponse{
@@ -1720,18 +1752,20 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 				TotalTokens:      inputTokens + outputTokens,
 			},
 		}
-		usageData, _ := json.Marshal(usageChunk)
-		fmt.Fprintf(w, "data: %s\n\n", usageData)
+		if !sendChunk(usageChunk) {
+			return result
+		}
 	}
 
-	fmt.Fprintf(w, "data: [DONE]\n\n")
+	if _, err := fmt.Fprintf(w, "data: [DONE]\n\n"); err != nil {
+		result.Success = false
+		result.ErrorMessage = err.Error()
+		return result
+	}
 	flusher.Flush()
 
 	result.HasContent = hasContent
 	result.OutputTokens = outputTokens
-	if !hasContent && result.ErrorMessage == "" {
-		result.ErrorMessage = "empty response"
-	}
 	return result
 }
 
