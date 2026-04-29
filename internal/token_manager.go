@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+
+	fhttp "github.com/bogdanfinn/fhttp"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -154,8 +156,13 @@ func (tm *TokenManager) loadTokens() error {
 		}
 	}
 
-	LogInfo("已加载 %d 个 token", len(tm.validTokens))
-	return scanner.Err()
+	validN := len(tm.validTokens)
+	LogInfo("已加载 %d 个 token", validN)
+	scanErr := scanner.Err()
+	if validN > 0 {
+		invalidateAnonymousPoolSlots()
+	}
+	return scanErr
 }
 
 // createExampleTokenFile 创建示例 token 文件
@@ -266,12 +273,12 @@ func (tm *TokenManager) validateAllTokens() {
 
 // validateToken 验证单个 token
 func (tm *TokenManager) validateToken(token string) bool {
-	req, err := http.NewRequest("GET", "https://chat.z.ai/api/v1/auths/", nil)
+	req, err := fhttp.NewRequest("GET", "https://chat.z.ai/api/v1/auths/", nil)
 	if err != nil {
 		return false
 	}
 
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0")
+	ApplyBrowserFingerprintHeaders(req.Header)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Accept-Language", "zh-CN")
 	req.Header.Set("Cache-Control", "no-cache")
@@ -282,13 +289,14 @@ func (tm *TokenManager) validateToken(token string) bool {
 	req.Header.Set("Sec-Fetch-Dest", "empty")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	req.Header.Set("sec-ch-ua", `"Chromium";v="142", "Microsoft Edge";v="142", "Not_A Brand";v="99"`)
-	req.Header.Set("sec-ch-ua-mobile", "?0")
-	req.Header.Set("sec-ch-ua-platform", `"Linux"`)
 	req.Header.Set("sec-gpc", "1")
-	req.AddCookie(&http.Cookie{Name: "token", Value: token})
+	req.AddCookie(&fhttp.Cookie{Name: "token", Value: token})
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client, err := TLSHTTPClient(10 * time.Second)
+	if err != nil {
+		LogDebug("Token 验证 tls client: %v", err)
+		return false
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		LogDebug("Token 验证请求失败: %v", err)
@@ -387,6 +395,13 @@ func (tm *TokenManager) removeInvalidTokens() {
 
 	os.WriteFile(tokenFile, []byte(content), 0644)
 	LogInfo("已移除 %d 个失效 token 到 %s", len(invalidTokens), invalidFile)
+}
+
+// HasValidUpstreamTokens 是否存在可用的 z.ai 上游 token（TokenManager 轮询用）
+func (tm *TokenManager) HasValidUpstreamTokens() bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return len(tm.validTokens) > 0
 }
 
 // GetToken 获取一个有效 token（轮询）

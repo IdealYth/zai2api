@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/corpix/uarand"
+	fhttp "github.com/bogdanfinn/fhttp"
 	"github.com/google/uuid"
 )
 
@@ -120,7 +120,7 @@ func extractAllMediaURLs(messages []Message) (imageURLs, videoURLs []string) {
 	return imageURLs, videoURLs
 }
 
-func makeUpstreamRequest(token string, messages []Message, model string, imageURLs, videoURLs []string, hasTools bool) (*http.Response, string, error) {
+func makeUpstreamRequest(token string, messages []Message, model string, imageURLs, videoURLs []string, hasTools bool) (*fhttp.Response, string, error) {
 	payload, err := DecodeJWTPayload(token)
 	if err != nil || payload == nil {
 		return nil, "", fmt.Errorf("invalid token")
@@ -273,7 +273,7 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 
 	bodyBytes, _ := json.Marshal(body)
 
-	req, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
+	req, err := fhttp.NewRequest("POST", url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, "", err
 	}
@@ -287,13 +287,16 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("Origin", "https://chat.z.ai")
 	req.Header.Set("Referer", fmt.Sprintf("https://chat.z.ai/c/%s", chatID))
-	req.Header.Set("User-Agent", uarand.GetRandom())
+	ApplyBrowserFingerprintHeaders(req.Header)
 	req.Header.Set("X-Forwarded-For", randomIP)
 	req.Header.Set("X-Real-IP", randomIP)
 
 	LogDebug("Upstream request: model=%s, messages=%d, XFF=%s", targetModel, len(messages), randomIP)
 
-	client := &http.Client{Timeout: 300 * time.Second}
+	client, err := TLSHTTPClient(300 * time.Second)
+	if err != nil {
+		return nil, "", err
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, "", err
