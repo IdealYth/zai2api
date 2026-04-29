@@ -1,8 +1,10 @@
 package internal
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"html"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -31,17 +33,23 @@ type ToolCallFunction struct {
 }
 
 var (
-	toolCallFencePattern     = regexp.MustCompile("(?s)```(?:json)?\\s*(\\{.*?\\}|\\[.*?\\])\\s*```")
-	functionCallPattern      = regexp.MustCompile(`(?s)调用函数\s*[：:]\s*([\w\-\.]+)\s*(?:参数|arguments)[：:]\s*(\{.*?\})`)
-	functionInvokePattern    = regexp.MustCompile(`(?s)\b([\w\-\.]+)\s*\(\s*(\{.*?\})\s*\)`)
-	toolTaggedPayloadPattern = regexp.MustCompile(`(?is)<(?:tool_call|function_call)\)?\s*>(.*?)</(?:tool_call|function_call)\)?\s*>`)
-	callIDCounter            int64
+	toolCallFencePattern       = regexp.MustCompile("(?s)```(?:json|xml)?\\s*(.*?)\\s*```")
+	functionCallPattern        = regexp.MustCompile(`(?s)调用函数\s*[：:]\s*([\w\-\.]+)\s*(?:参数|arguments)[：:]\s*(\{.*?\})`)
+	functionInvokePattern      = regexp.MustCompile(`(?s)\b([\w\-\.]+)\s*\(\s*(\{.*?\})\s*\)`)
+	xmlToolCallBlockPattern    = regexp.MustCompile(`(?is)<tool_calls>\s*(.*?)\s*</tool_calls>`)
+	xmlToolCallItemPattern     = regexp.MustCompile(`(?is)<tool_call(?:\s+id="([^"]+)")?>(.*?)</tool_call>`)
+	xmlToolNamePattern         = regexp.MustCompile(`(?is)<name>\s*([^<]+?)\s*</name>`)
+	xmlToolArgumentsPattern    = regexp.MustCompile(`(?is)<arguments>\s*(.*?)\s*</arguments>`)
+	xmlToolArgumentsCDataStart = "<![CDATA["
+	xmlToolArgumentsCDataEnd   = "]]>"
+	callIDCounter              int64
 )
 
 func GenerateToolPrompt(tools []Tool, toolChoice interface{}) string {
 	if len(tools) == 0 {
 		return ""
 	}
+
 	var toolDefs []string
 	var toolNames []string
 	for _, tool := range tools {
@@ -51,43 +59,21 @@ func GenerateToolPrompt(tools []Tool, toolChoice interface{}) string {
 
 		fn := tool.Function
 		toolNames = append(toolNames, fn.Name)
-		toolInfo := fmt.Sprintf("### %s\n%s", fn.Name, fn.Description)
+		toolInfo := fmt.Sprintf("<tool>\n<name>%s</name>", html.EscapeString(fn.Name))
+		if fn.Description != "" {
+			toolInfo += fmt.Sprintf("\n<description>%s</description>", html.EscapeString(fn.Description))
+		}
+
 		if len(fn.Parameters) > 0 {
-			var params struct {
-				Type       string                 `json:"type"`
-				Properties map[string]interface{} `json:"properties"`
-				Required   []string               `json:"required"`
-			}
-			if err := json.Unmarshal(fn.Parameters, &params); err == nil && len(params.Properties) > 0 {
-				requiredSet := make(map[string]bool)
-				for _, r := range params.Required {
-					requiredSet[r] = true
-				}
-
-				toolInfo += "\n**参数:**"
-				for name, details := range params.Properties {
-					detailMap, _ := details.(map[string]interface{})
-					paramType, _ := detailMap["type"].(string)
-					paramDesc, _ := detailMap["description"].(string)
-					enumVals, hasEnum := detailMap["enum"].([]interface{})
-
-					reqMark := ""
-					if requiredSet[name] {
-						reqMark = " (必填)"
-					}
-
-					paramLine := fmt.Sprintf("\n- **%s** (%s%s): %s", name, paramType, reqMark, paramDesc)
-					if hasEnum && len(enumVals) > 0 {
-						var enumStrs []string
-						for _, e := range enumVals {
-							enumStrs = append(enumStrs, fmt.Sprintf("`%v`", e))
-						}
-						paramLine += fmt.Sprintf(" [可选值: %s]", strings.Join(enumStrs, ", "))
-					}
-					toolInfo += paramLine
-				}
+			var prettyParams bytes.Buffer
+			if err := json.Indent(&prettyParams, fn.Parameters, "", "  "); err == nil {
+				toolInfo += fmt.Sprintf("\n<parameters><![CDATA[%s]]></parameters>", prettyParams.String())
+			} else {
+				toolInfo += fmt.Sprintf("\n<parameters><![CDATA[%s]]></parameters>", string(fn.Parameters))
 			}
 		}
+
+		toolInfo += "\n</tool>"
 		toolDefs = append(toolDefs, toolInfo)
 	}
 
@@ -96,61 +82,54 @@ func GenerateToolPrompt(tools []Tool, toolChoice interface{}) string {
 	}
 
 	instructions := getToolChoiceInstructions(toolChoice, toolNames)
-	return "\n\n# 可用工具\n" + strings.Join(toolDefs, "\n\n") + "\n\n" + instructions
+	return "<tool_injection>\n<available_tools>\n" + strings.Join(toolDefs, "\n") + "\n</available_tools>\n" + instructions + "\n</tool_injection>"
 }
 
 func getToolChoiceInstructions(toolChoice interface{}, toolNames []string) string {
-	allowedTools := strings.Join(toolNames, ", ")
-	baseInstructions := fmt.Sprintf(`# 工具调用格式
-你当前请求中唯一允许使用的函数工具是：%s
-这些工具由调用方显式提供，必须视为真实可用。
-不要声称“没有这个工具”，不要改用你自己的内置工具，也不要改写函数名。
-
-当需要调用工具时，优先输出以下 OpenAI 兼容 JSON：
-`+"```json"+`
-{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"函数名","arguments":"{\"参数名\":\"参数值\"}"}}]}
-`+"```"+`
-
-也兼容以下次选格式，但只有在你无法稳定输出首选格式时才使用：
-`+"```json"+`
-{"name":"函数名","arguments":{"参数名":"参数值"}}
-`+"```"+`
-或：
-`+"```xml"+`
-<tool_call>{"name":"函数名","arguments":{"参数名":"参数值"}}</tool_call>
-`+"```"+`
-
-**重要规则：**
-1. 首选输出必须是纯 JSON，不要添加解释文字
-2. tool_calls[].function.arguments 必须是 JSON 字符串，不是对象
-3. 只能调用上面列出的函数名，不能改名，不能替换成别的工具
-4. 如果用户要求使用工具或 tool_choice 有要求，你必须先调用工具，不能先解释为什么不能调用
-5. 即使信息不完整，也要先依据已有上下文构造最合理的参数发起调用
-6. 可以同时调用多个工具，但只有在任务确实需要时才这么做
-7. 如果已经收到工具结果，必须直接根据结果回答，不能重复调用工具
-
-# 工具结果处理
-当你看到以 "[已执行工具调用]" 开头的助手消息和以 "[工具返回结果]" 开头的用户消息时，说明工具已经被调用并返回了结果。
-**此时你必须直接使用工具返回的数据来回答用户，绝对不要再次调用工具。**`, allowedTools)
+	allowedTools := html.EscapeString(strings.Join(toolNames, ", "))
+	baseInstructions := fmt.Sprintf(`<call_protocol>
+<allowed_tools>%s</allowed_tools>
+<response_format>
+  <tool_calls>
+    <tool_call id="call_1">
+      <name>函数名</name>
+      <arguments><![CDATA[{"参数名":"参数值"}]]></arguments>
+    </tool_call>
+  </tool_calls>
+</response_format>
+<rules>
+  <rule index="1">只能调用上面列出的函数名，不能改名，不能替换成别的工具。</rule>
+  <rule index="2">当需要调用工具时，只输出 XML 工具调用，不要附带解释、Markdown、代码块或额外文本。</rule>
+  <rule index="3">arguments 必须是合法 JSON；如果没有参数，使用 {}。</rule>
+  <rule index="4">如果用户要求使用工具或 tool_choice 有要求，你必须先调用工具，不能先解释为什么不能调用。</rule>
+  <rule index="5">即使信息不完整，也要先依据已有上下文构造最合理的参数发起调用。</rule>
+  <rule index="6">如果已经收到工具结果，必须直接根据结果回答，不能重复调用工具。</rule>
+  <rule index="7">不要把 &lt;tool_calls&gt;、&lt;tool_call&gt;、&lt;name&gt;、&lt;arguments&gt; 当成普通回答内容输出给用户。</rule>
+</rules>
+<tool_result_handling>
+  <assistant_marker>[已执行工具调用]</assistant_marker>
+  <user_marker>[工具返回结果]</user_marker>
+  <instruction>当你看到这些标记时，说明工具已经被调用并返回了结果。你必须直接使用工具返回的数据回答用户，绝对不要再次调用工具。</instruction>
+</tool_result_handling>
+</call_protocol>`, allowedTools)
 
 	switch tc := toolChoice.(type) {
 	case string:
-		if tc == "auto" {
-			return baseInstructions + "\n8. 根据用户需求自行判断是否需要调用工具。"
-		} else if tc == "required" {
-			return baseInstructions + "\n8. **必须**调用至少一个工具来响应用户请求。"
+		if tc == "required" {
+			return baseInstructions + "\n<tool_choice mode=\"required\" />"
 		}
+		return baseInstructions + "\n<tool_choice mode=\"auto\" />"
 	case map[string]interface{}:
 		if tc["type"] == "function" {
 			if fn, ok := tc["function"].(map[string]interface{}); ok {
 				if name, ok := fn["name"].(string); ok {
-					return baseInstructions + fmt.Sprintf("\n8. **必须**调用 `%s` 工具来响应用户请求。", name)
+					return baseInstructions + fmt.Sprintf("\n<tool_choice mode=\"required\" tool=\"%s\" />", html.EscapeString(name))
 				}
 			}
 		}
 	}
 
-	return baseInstructions + "\n8. 根据用户需求自行判断是否需要调用工具。"
+	return baseInstructions + "\n<tool_choice mode=\"auto\" />"
 }
 
 func ProcessMessagesWithTools(messages []Message, tools []Tool, toolChoice interface{}) []Message {
@@ -191,7 +170,7 @@ func ProcessMessagesWithTools(messages []Message, tools []Tool, toolChoice inter
 	if !hasSystem {
 		systemMsg := Message{
 			Role:    "system",
-			Content: "你是一个智能助手，能够帮助用户完成各种任务。" + toolPrompt,
+			Content: "<system_instructions>\n<assistant_identity>你是一个智能助手，能够帮助用户完成各种任务。</assistant_identity>\n" + toolPrompt + "\n</system_instructions>",
 		}
 		processed = append([]Message{systemMsg}, processed...)
 	}
@@ -411,19 +390,101 @@ func parseNamedFunctionObject(jsonStr string) []ToolCall {
 	}}
 }
 
-func parseTaggedToolPayload(text string) []ToolCall {
-	matches := toolTaggedPayloadPattern.FindAllStringSubmatch(text, -1)
-	for _, match := range matches {
-		if len(match) < 2 {
+func trimXMLArgumentsPayload(payload string) string {
+	payload = strings.TrimSpace(payload)
+	if strings.HasPrefix(payload, xmlToolArgumentsCDataStart) && strings.HasSuffix(payload, xmlToolArgumentsCDataEnd) {
+		payload = strings.TrimPrefix(payload, xmlToolArgumentsCDataStart)
+		payload = strings.TrimSuffix(payload, xmlToolArgumentsCDataEnd)
+	}
+	return strings.TrimSpace(html.UnescapeString(payload))
+}
+
+func parseXMLToolCalls(text string) []ToolCall {
+	blocks := xmlToolCallBlockPattern.FindAllStringSubmatch(text, -1)
+	for _, block := range blocks {
+		if len(block) < 2 {
 			continue
 		}
-		payload := strings.TrimSpace(match[1])
-		if calls := parseToolCallsJSON(payload); calls != nil {
+		itemMatches := xmlToolCallItemPattern.FindAllStringSubmatch(block[1], -1)
+		if len(itemMatches) == 0 {
+			continue
+		}
+
+		calls := make([]ToolCall, 0, len(itemMatches))
+		for _, item := range itemMatches {
+			if len(item) < 3 {
+				continue
+			}
+			nameMatch := xmlToolNamePattern.FindStringSubmatch(item[2])
+			if len(nameMatch) < 2 {
+				continue
+			}
+			args := "{}"
+			if argsMatch := xmlToolArgumentsPattern.FindStringSubmatch(item[2]); len(argsMatch) >= 2 {
+				args = trimXMLArgumentsPayload(argsMatch[1])
+				if args == "" {
+					args = "{}"
+				}
+			}
+			calls = append(calls, ToolCall{
+				ID:   strings.TrimSpace(item[1]),
+				Type: "function",
+				Function: ToolCallFunction{
+					Name:      strings.TrimSpace(html.UnescapeString(nameMatch[1])),
+					Arguments: args,
+				},
+			})
+		}
+		if len(calls) > 0 {
 			return calls
 		}
-		if calls := parseNamedFunctionObject(payload); calls != nil {
-			return calls
+	}
+
+	itemMatches := xmlToolCallItemPattern.FindAllStringSubmatch(text, -1)
+	if len(itemMatches) == 0 {
+		return nil
+	}
+	calls := make([]ToolCall, 0, len(itemMatches))
+	for _, item := range itemMatches {
+		if len(item) < 3 {
+			continue
 		}
+		payload := strings.TrimSpace(item[2])
+		if callsFromJSON := parseToolCallsJSON(payload); callsFromJSON != nil {
+			return callsFromJSON
+		}
+		if callsFromJSON := parseNamedFunctionObject(payload); callsFromJSON != nil {
+			return callsFromJSON
+		}
+		nameMatch := xmlToolNamePattern.FindStringSubmatch(payload)
+		if len(nameMatch) < 2 {
+			continue
+		}
+		args := "{}"
+		if argsMatch := xmlToolArgumentsPattern.FindStringSubmatch(payload); len(argsMatch) >= 2 {
+			args = trimXMLArgumentsPayload(argsMatch[1])
+			if args == "" {
+				args = "{}"
+			}
+		}
+		calls = append(calls, ToolCall{
+			ID:   strings.TrimSpace(item[1]),
+			Type: "function",
+			Function: ToolCallFunction{
+				Name:      strings.TrimSpace(html.UnescapeString(nameMatch[1])),
+				Arguments: args,
+			},
+		})
+	}
+	if len(calls) == 0 {
+		return nil
+	}
+	return calls
+}
+
+func parseTaggedToolPayload(text string) []ToolCall {
+	if calls := parseXMLToolCalls(text); calls != nil {
+		return calls
 	}
 	return nil
 }
@@ -461,23 +522,29 @@ func ExtractToolInvocations(text string) []ToolCall {
 		scanText = scanText[:Cfg.ScanLimit]
 	}
 
-	matches := toolCallFencePattern.FindAllStringSubmatch(scanText, -1)
-	for _, match := range matches {
-		if len(match) > 1 {
-			if calls := parseToolCallsJSON(match[1]); calls != nil {
-				LogDebug("[ExtractToolInvocations] Found %d tool calls in JSON fence", len(calls))
-				return validateAndNormalizeCalls(calls)
-			}
-			if calls := parseNamedFunctionObject(match[1]); calls != nil {
-				LogDebug("[ExtractToolInvocations] Found named function object in JSON fence")
-				return validateAndNormalizeCalls(calls)
-			}
-		}
+	if calls := parseTaggedToolPayload(scanText); calls != nil {
+		LogDebug("[ExtractToolInvocations] Found XML tool payload")
+		return validateAndNormalizeCalls(calls)
 	}
 
-	if calls := parseTaggedToolPayload(scanText); calls != nil {
-		LogDebug("[ExtractToolInvocations] Found tagged tool payload")
-		return validateAndNormalizeCalls(calls)
+	matches := toolCallFencePattern.FindAllStringSubmatch(scanText, -1)
+	for _, match := range matches {
+		if len(match) <= 1 {
+			continue
+		}
+		payload := strings.TrimSpace(match[1])
+		if calls := parseTaggedToolPayload(payload); calls != nil {
+			LogDebug("[ExtractToolInvocations] Found XML tool payload in fence")
+			return validateAndNormalizeCalls(calls)
+		}
+		if calls := parseToolCallsJSON(payload); calls != nil {
+			LogDebug("[ExtractToolInvocations] Found %d tool calls in JSON fence", len(calls))
+			return validateAndNormalizeCalls(calls)
+		}
+		if calls := parseNamedFunctionObject(payload); calls != nil {
+			LogDebug("[ExtractToolInvocations] Found named function object in fence")
+			return validateAndNormalizeCalls(calls)
+		}
 	}
 
 	if calls := extractInlineToolCalls(scanText); calls != nil {
@@ -624,14 +691,18 @@ func isToolPayload(jsonStr string) bool {
 }
 
 func RemoveToolJSONContent(text string) string {
-	result := toolCallFencePattern.ReplaceAllStringFunc(text, func(match string) string {
+	result := xmlToolCallBlockPattern.ReplaceAllString(text, "")
+	result = xmlToolCallItemPattern.ReplaceAllString(result, "")
+	result = toolCallFencePattern.ReplaceAllStringFunc(result, func(match string) string {
 		submatch := toolCallFencePattern.FindStringSubmatch(match)
-		if len(submatch) > 1 && isToolPayload(strings.TrimSpace(submatch[1])) {
-			return ""
+		if len(submatch) > 1 {
+			payload := strings.TrimSpace(submatch[1])
+			if parseTaggedToolPayload(payload) != nil || isToolPayload(payload) {
+				return ""
+			}
 		}
 		return match
 	})
-	result = toolTaggedPayloadPattern.ReplaceAllString(result, "")
 	result = removeInlineToolCallJSON(result)
 	result = removeInlineSingleFunctionCallJSON(result)
 	return strings.TrimSpace(result)

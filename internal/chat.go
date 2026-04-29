@@ -667,6 +667,7 @@ func handleStreamResponse(w http.ResponseWriter, body io.ReadCloser, completionI
 	pendingSourcesMarkdown := ""
 	pendingImageSearchMarkdown := ""
 	totalContentOutputLength := 0 // 记录已输出的 content 字符长度
+	hasTools := len(tools) > 0
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -963,6 +964,10 @@ func handleStreamResponse(w http.ResponseWriter, body io.ReadCloser, completionI
 			totalContentOutputLength += len([]rune(content))
 		}
 		fullContent.WriteString(content)
+		outputTokens += CountTokens(content)
+		if hasTools {
+			continue
+		}
 
 		chunk := ChatCompletionChunk{
 			ID:      completionID,
@@ -976,7 +981,6 @@ func handleStreamResponse(w http.ResponseWriter, body io.ReadCloser, completionI
 			}},
 		}
 
-		outputTokens += CountTokens(content)
 		chunkData, _ := json.Marshal(chunk)
 		fmt.Fprintf(w, "data: %s\n\n", chunkData)
 		flusher.Flush()
@@ -989,20 +993,22 @@ func handleStreamResponse(w http.ResponseWriter, body io.ReadCloser, completionI
 	if remaining := searchRefFilter.Flush(); remaining != "" {
 		hasContent = true
 		fullContent.WriteString(remaining)
-		chunk := ChatCompletionChunk{
-			ID:      completionID,
-			Object:  "chat.completion.chunk",
-			Created: time.Now().Unix(),
-			Model:   modelName,
-			Choices: []Choice{{
-				Index:        0,
-				Delta:        &Delta{Content: remaining},
-				FinishReason: nil,
-			}},
+		if !hasTools {
+			chunk := ChatCompletionChunk{
+				ID:      completionID,
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   modelName,
+				Choices: []Choice{{
+					Index:        0,
+					Delta:        &Delta{Content: remaining},
+					FinishReason: nil,
+				}},
+			}
+			chunkData, _ := json.Marshal(chunk)
+			fmt.Fprintf(w, "data: %s\n\n", chunkData)
+			flusher.Flush()
 		}
-		chunkData, _ := json.Marshal(chunk)
-		fmt.Fprintf(w, "data: %s\n\n", chunkData)
-		flusher.Flush()
 	}
 
 	if !hasContent {
@@ -1040,6 +1046,24 @@ func handleStreamResponse(w http.ResponseWriter, body io.ReadCloser, completionI
 				}
 				toolData, _ := json.Marshal(toolChunk)
 				fmt.Fprintf(w, "data: %s\n\n", toolData)
+				flusher.Flush()
+			}
+		} else {
+			bufferedContent := RemoveToolJSONContent(rawContent)
+			if bufferedContent != "" {
+				chunk := ChatCompletionChunk{
+					ID:      completionID,
+					Object:  "chat.completion.chunk",
+					Created: time.Now().Unix(),
+					Model:   modelName,
+					Choices: []Choice{{
+						Index:        0,
+						Delta:        &Delta{Content: bufferedContent},
+						FinishReason: nil,
+					}},
+				}
+				chunkData, _ := json.Marshal(chunk)
+				fmt.Fprintf(w, "data: %s\n\n", chunkData)
 				flusher.Flush()
 			}
 		}
@@ -1231,9 +1255,9 @@ func handleNonStreamResponse(w http.ResponseWriter, body io.ReadCloser, completi
 	var toolCalls []ToolCall
 	if len(tools) > 0 {
 		toolCalls = ExtractToolInvocations(fullContent)
+		fullContent = RemoveToolJSONContent(fullContent)
 		if len(toolCalls) > 0 {
 			stopReason = "tool_calls"
-			fullContent = RemoveToolJSONContent(fullContent)
 		}
 	}
 	outputTokens = CountTokens(fullContent) + CountTokens(fullReasoning)
@@ -1933,9 +1957,9 @@ func handleNonStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser,
 	var toolCalls []ToolCall
 	if len(tools) > 0 {
 		toolCalls = ExtractToolInvocations(fullContent)
+		fullContent = RemoveToolJSONContent(fullContent)
 		if len(toolCalls) > 0 {
 			stopReason = "tool_calls"
-			fullContent = RemoveToolJSONContent(fullContent)
 		}
 	}
 
