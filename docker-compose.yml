@@ -3,6 +3,8 @@ services:
     image: ghcr.io/idealyth/zai2api:latest
     env_file:
       - .env
+    volumes:
+      - ./data:/app/data
     ports:
       - "${PORT:-8000}:${PORT:-8000}"
     restart: unless-stopped

@@ -37,6 +37,14 @@ cp .env.example .env
 docker compose up -d
 ```
 
+### Token 读取流程
+
+- 客户端请求本服务时，先使用 `.env` 中的 `AUTH_TOKEN` 作为本服务的访问凭证。
+- 服务转发到上游 `chat.z.ai` 时，会优先读取 `data/tokens.txt` 中的 token。
+- 如果 `data/tokens.txt` 中没有可用 token，则回退到 `.env` 中的 `BACKUP_TOKEN`。
+- 如果前两者都没有可用值，则会尝试使用匿名 token。
+- Docker Compose 已将宿主机的 `./data` 挂载到容器内的 `/app/data`，因此容器会读取你本地的 `data/tokens.txt`。
+
 ### 配置
 
 复制配置文件并修改：
