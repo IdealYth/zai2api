@@ -1,5 +1,6 @@
 services:
   zai2api:
+    container_name: zai2api
     image: ghcr.io/idealyth/zai2api:latest
     env_file:
       - .env
