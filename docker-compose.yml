@@ -1,9 +1,6 @@
 services:
   zai2api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: zai2api:local
+    image: ghcr.io/idealyth/zai2api:latest
     env_file:
       - .env
     ports:
