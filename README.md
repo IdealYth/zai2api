@@ -67,6 +67,32 @@ docker compose up --build -d
 docker compose down
 ```
 
+### 直接拉取 GHCR 镜像
+
+推送到 `main` 后，GitHub Actions 会发布：
+
+```bash
+ghcr.io/idealyth/zai2api:latest
+```
+
+推送匹配 `v*` 的 Git 标签后，还会额外发布同名版本标签，例如：
+
+```bash
+ghcr.io/idealyth/zai2api:v1.2.3
+```
+
+注意：GHCR 容器包第一次发布后，GitHub 默认将包可见性设为 `private`。如果你希望任何人都能直接执行下面的 `docker pull`，需要先到 GitHub Packages 页面把该包切换为 `public`。
+
+直接拉取并运行：
+
+```bash
+cp .env.example .env
+docker pull ghcr.io/idealyth/zai2api:latest
+docker run --rm -p 8000:8000 --env-file .env ghcr.io/idealyth/zai2api:latest
+```
+
+如果你使用版本标签，只需要把上面的 `latest` 替换成对应的 `v*` 标签。若 `.env` 中修改了 `PORT`，同样需要同步调整 `-p 主机端口:容器端口`。
+
 ### 配置
 
 复制配置文件并修改：
@@ -120,6 +146,8 @@ AUTH_TOKEN=your-api-key
 - 容器运行时仍然完全依赖环境变量配置，推荐通过 `--env-file .env` 或 `docker-compose.yml` 的 `env_file` 传入。
 - 镜像默认 `ENV PORT=8000` 且 `EXPOSE 8000`；`docker run` 自定义 `PORT` 时，需要同步调整 `-p` 映射。
 - `docker-compose.yml` 通过 `${PORT:-8000}:${PORT:-8000}` 保持宿主机与容器端口一致，前提是仓库根目录存在 `.env`。
+- `.github/workflows/publish-ghcr.yml` 会在推送 `main` 时发布 `ghcr.io/idealyth/zai2api:latest`，在推送 `v*` 标签时发布对应版本标签。
+- GHCR 包首次发布后默认是私有可见；README 中的匿名 `docker pull` 示例成立前，需要先把包可见性改成 `public`。
 
 ## 代理支持状态
 
