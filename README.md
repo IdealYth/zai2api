@@ -27,7 +27,44 @@
 ```bash
 git clone https://github.com/XxxXTeam/zai2api.git
 cd zai2api
-go build -o zai2api ./cmd/main.go
+go build -o zai2api ./cmd
+```
+
+### 使用 Docker
+
+先准备环境变量文件：
+
+```bash
+cp .env.example .env
+```
+
+构建镜像：
+
+```bash
+docker build -t zai2api:latest .
+```
+
+启动容器：
+
+```bash
+docker run --rm -p 8000:8000 --env-file .env zai2api:latest
+```
+
+镜像内默认 `PORT=8000`。如果修改了 `.env` 里的 `PORT`，请同步调整 `-p 主机端口:容器端口` 的映射。
+
+### 使用 Docker Compose
+
+```bash
+cp .env.example .env
+docker compose up --build -d
+```
+
+`docker-compose.yml` 会读取仓库根目录的 `.env`，同时用于 `${PORT:-8000}` 端口替换和 `env_file` 注入容器环境。
+
+停止服务：
+
+```bash
+docker compose down
 ```
 
 ### 配置
@@ -53,6 +90,8 @@ AUTH_TOKEN=your-api-key
 
 服务将在 `http://localhost:8000` 启动。
 
+如果使用 Docker Compose，默认也会通过 `.env` 中的 `PORT` 暴露同一个端口。
+
 ## API 端点
 
 | 端点 | 方法 | 描述 |
@@ -74,6 +113,19 @@ AUTH_TOKEN=your-api-key
 | `LOG_LEVEL` | info | 日志级别：debug/info/warn/error |
 
 完整配置请参考 [.env.example](.env.example)
+
+## Docker 部署说明
+
+- `Dockerfile` 使用多阶段构建，在构建阶段编译静态 Linux 二进制，在运行阶段使用精简 Alpine 镜像。
+- 容器运行时仍然完全依赖环境变量配置，推荐通过 `--env-file .env` 或 `docker-compose.yml` 的 `env_file` 传入。
+- 镜像默认 `ENV PORT=8000` 且 `EXPOSE 8000`；`docker run` 自定义 `PORT` 时，需要同步调整 `-p` 映射。
+- `docker-compose.yml` 通过 `${PORT:-8000}:${PORT:-8000}` 保持宿主机与容器端口一致，前提是仓库根目录存在 `.env`。
+
+## 代理支持状态
+
+- 当前仓库 **没有** 提供可配置的上游代理环境变量，也没有把代理参数接入到运行时配置。
+- 底层依赖 `github.com/bogdanfinn/tls-client` 本身支持 HTTP / HTTPS / SOCKS 代理，但这只是底层能力，不代表本项目已经提供一键可用的代理配置。
+- 这次 Docker / Compose 支持没有实现代理配置；如需代理能力，需要后续单独补充配置项和客户端接线逻辑。
 
 ## 使用示例
 
@@ -138,6 +190,8 @@ zai2api/
 ├── cmd/
 │   ├── main.go           # 主程序入口
 │   └── register/         # Token 注册工具
+├── Dockerfile            # 生产友好的容器构建
+├── docker-compose.yml    # 本地/服务器容器启动示例
 ├── internal/
 │   ├── chat.go           # 聊天补全处理
 │   ├── config.go         # 配置管理

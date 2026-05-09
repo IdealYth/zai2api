@@ -1,0 +1,11 @@
+services:
+  zai2api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zai2api:local
+    env_file:
+      - .env
+    ports:
+      - "${PORT:-8000}:${PORT:-8000}"
+    restart: unless-stopped
